@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+.claude/
+uploads/*.jpg
+uploads/*.jpeg
+uploads/*.png
+uploads/*.gif
+uploads/*.webp
+docs/LEARNING.md
