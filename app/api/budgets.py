@@ -35,7 +35,9 @@ async def list_budgets(
         end = date(year + 1, 1, 1) if mo == 12 else date(year, mo + 1, 1)
 
         spent_result = await db.execute(
-            select(func.coalesce(func.sum(Expense.base_amount), 0)).where(
+            select(func.coalesce(func.sum(
+                func.coalesce(Expense.base_amount, Expense.amount)
+            ), 0)).where(
                 Expense.category_id == b.category_id,
                 Expense.date >= start,
                 Expense.date < end,
