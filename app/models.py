@@ -22,7 +22,7 @@ class Expense(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), default="MYR", nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="SGD", nullable=False)
     date: Mapped[date] = mapped_column(Date, nullable=False)
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     vendor: Mapped[str | None] = mapped_column(String(255), nullable=True)

@@ -20,7 +20,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _client = genai.Client(api_key=settings.gemini_api_key)
-_MODEL = "gemini-2.0-flash"
+_MODEL = "gemini-2.5-flash"
 
 # Categories sent to the model so it picks from the predefined list.
 _CATEGORIES = [

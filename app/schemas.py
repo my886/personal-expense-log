@@ -24,7 +24,7 @@ class CategoryCreate(BaseModel):
 
 class ExpenseCreate(BaseModel):
     amount: Decimal = Field(..., gt=0, decimal_places=2)
-    currency: str = Field(default="MYR", min_length=3, max_length=3)
+    currency: str = Field(default="SGD", min_length=3, max_length=3)
     date: dt.date
     category_id: int | None = None
     vendor: str | None = Field(default=None, max_length=255)
@@ -65,7 +65,7 @@ class ExpenseOut(BaseModel):
 class OcrResult(BaseModel):
     date: dt.date | None = None
     amount: Decimal | None = None
-    currency: str = "MYR"
+    currency: str = "SGD"
     vendor: str | None = None
     category_id: int | None = None
     category_name: str | None = None
