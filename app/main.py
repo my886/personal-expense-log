@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import categories, expenses, ocr, analytics, storage
+from app.api import budgets, categories, expenses, ocr, analytics, storage
 
 
 @asynccontextmanager
@@ -20,6 +20,7 @@ app = FastAPI(
 app.include_router(ocr.router)         # POST /expenses/ocr — must be before expenses router
 app.include_router(expenses.router)    # CRUD /expenses
 app.include_router(categories.router)  # /categories
+app.include_router(budgets.router)     # /budgets
 app.include_router(analytics.router)   # /analytics/summary
 app.include_router(storage.router)     # DELETE /storage/images
 
