@@ -102,6 +102,7 @@ class MonthlySummary(BaseModel):
     base_total: Decimal | None = None
     currency: str
     count: int
+    daily_avg: Decimal | None = None
     by_category: list[CategoryBreakdown]
 
 
