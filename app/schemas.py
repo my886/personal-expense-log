@@ -132,3 +132,20 @@ class BudgetOut(BaseModel):
 
 class PurgeResult(BaseModel):
     purged_count: int
+
+
+# ── Exchange Rate ─────────────────────────────────────────────────────────────
+
+class ExchangeRateSet(BaseModel):
+    """Set or update an exchange rate. rate = how many SGD per 1 unit of target currency."""
+    target_currency: str = Field(..., min_length=3, max_length=3)
+    rate: Decimal = Field(..., gt=0, decimal_places=6)
+
+
+class ExchangeRateOut(BaseModel):
+    id: int
+    target_currency: str
+    rate: Decimal
+    updated_at: dt.datetime
+
+    model_config = {"from_attributes": True}

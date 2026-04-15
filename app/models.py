@@ -52,3 +52,12 @@ class Budget(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     category: Mapped[Category] = relationship("Category")
+
+
+class ExchangeRate(Base):
+    __tablename__ = "exchange_rates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_currency: Mapped[str] = mapped_column(String(3), nullable=False, unique=True)
+    rate: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)  # 1 target_currency = X SGD
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

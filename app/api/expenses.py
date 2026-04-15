@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Expense
+from app.models import Expense, ExchangeRate
 from app.schemas import ExpenseCreate, ExpenseOut, ExpenseUpdate
 
 router = APIRouter(prefix="/expenses", tags=["expenses"])
@@ -65,7 +65,22 @@ async def list_expenses(
 
 @router.post("", response_model=ExpenseOut, status_code=201)
 async def create_expense(body: ExpenseCreate, db: AsyncSession = Depends(get_db)):
-    expense = Expense(**body.model_dump())
+    data = body.model_dump()
+    currency = data.get("currency", "SGD")
+
+    # Auto-calculate base_amount if not provided and currency != SGD
+    if currency != "SGD" and data.get("base_amount") is None:
+        rate_result = await db.execute(
+            select(ExchangeRate).where(ExchangeRate.target_currency == currency)
+        )
+        rate_obj = rate_result.scalar_one_or_none()
+        if rate_obj:
+            base = float(data["amount"]) * float(rate_obj.rate)
+            data["base_amount"] = round(base, 2)
+    elif currency == "SGD" and data.get("base_amount") is None:
+        data["base_amount"] = data["amount"]
+
+    expense = Expense(**data)
     db.add(expense)
     await db.commit()
     await db.refresh(expense)
