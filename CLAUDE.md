@@ -20,6 +20,11 @@ uv run uvicorn app.main:app --reload
 
 Copy `.env.example` to `.env` and fill in values.
 
+## Docs
+
+- `docs/BACKLOG.md` — open features and architecture decision log
+- `docs/INCIDENTS.md` — bug/incident log with root cause and fix (check here first when debugging)
+
 ## Known Quirks
 
 - `receipt_image_path` is nullable — purging images sets it to NULL but expense records survive
