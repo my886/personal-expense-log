@@ -1,7 +1,7 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import Date, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -16,7 +16,33 @@ async def list_budgets(
     month: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(Budget).order_by(Budget.month.desc())
+    stmt = (
+        select(
+            Budget.id,
+            Budget.category_id,
+            Category.name.label("category_name"),
+            Budget.month,
+            Budget.limit_amount,
+            Budget.currency,
+            Budget.created_at,
+            func.coalesce(func.sum(
+                func.coalesce(Expense.base_amount, Expense.amount)
+            ), 0).label("spent"),
+        )
+        .outerjoin(Category, Budget.category_id == Category.id)
+        .outerjoin(
+            Expense,
+            (Expense.category_id == Budget.category_id)
+            & (Expense.date >= Budget.month)
+            & (Expense.date < func.cast(
+                func.date_trunc("month", Budget.month) + text("interval '1 month'"),
+                Date,
+            ))
+            & (Expense.deleted_at.is_(None)),
+        )
+        .group_by(Budget.id, Category.name)
+        .order_by(Budget.month.desc())
+    )
     if month:
         try:
             year, mo = map(int, month.split("-"))
@@ -25,43 +51,22 @@ async def list_budgets(
         stmt = stmt.where(Budget.month == date(year, mo, 1))
 
     result = await db.execute(stmt)
-    budgets = result.scalars().all()
+    rows = result.all()
 
-    out = []
-    for b in budgets:
-        # Calculate spent amount for this budget's month/category
-        year, mo = b.month.year, b.month.month
-        start = date(year, mo, 1)
-        end = date(year + 1, 1, 1) if mo == 12 else date(year, mo + 1, 1)
-
-        spent_result = await db.execute(
-            select(func.coalesce(func.sum(
-                func.coalesce(Expense.base_amount, Expense.amount)
-            ), 0)).where(
-                Expense.category_id == b.category_id,
-                Expense.date >= start,
-                Expense.date < end,
-                Expense.deleted_at.is_(None),
-            )
+    return [
+        BudgetOut(
+            id=row.id,
+            category_id=row.category_id,
+            category_name=row.category_name,
+            month=row.month,
+            limit_amount=row.limit_amount,
+            currency=row.currency,
+            spent=row.spent,
+            remaining=row.limit_amount - row.spent,
+            created_at=row.created_at,
         )
-        spent = spent_result.scalar()
-
-        # Get category name
-        cat_result = await db.execute(select(Category).where(Category.id == b.category_id))
-        cat = cat_result.scalar_one_or_none()
-
-        out.append(BudgetOut(
-            id=b.id,
-            category_id=b.category_id,
-            category_name=cat.name if cat else None,
-            month=b.month,
-            limit_amount=b.limit_amount,
-            currency=b.currency,
-            spent=spent,
-            remaining=b.limit_amount - spent,
-            created_at=b.created_at,
-        ))
-    return out
+        for row in rows
+    ]
 
 
 @router.post("", response_model=BudgetOut, status_code=201)
