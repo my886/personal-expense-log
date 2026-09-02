@@ -78,6 +78,7 @@ class ExpenseOut(BaseModel):
 # ── OCR result (not saved) ────────────────────────────────────────────────────
 
 class OcrResult(BaseModel):
+    filename: str | None = None
     date: dt.date | None = None
     amount: Decimal | None = None
     currency: str = "SGD"
@@ -85,6 +86,8 @@ class OcrResult(BaseModel):
     category_id: int | None = None
     category_name: str | None = None
     raw_text: str | None = None
+    receipt_image_path: str | None = None
+    error: str | None = None
 
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
