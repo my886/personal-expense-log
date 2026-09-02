@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -91,10 +91,15 @@ async def create_expense(body: ExpenseCreate, db: AsyncSession = Depends(get_db)
 
 
 @router.get("/{expense_id}", response_model=ExpenseOut)
-async def get_expense(expense_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Expense).options(selectinload(Expense.category)).where(Expense.id == expense_id)
-    )
+async def get_expense(
+    expense_id: int,
+    include_deleted: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(Expense).options(selectinload(Expense.category)).where(Expense.id == expense_id)
+    if not include_deleted:
+        stmt = stmt.where(Expense.deleted_at.is_(None))
+    result = await db.execute(stmt)
     expense = result.scalar_one_or_none()
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
@@ -104,13 +109,33 @@ async def get_expense(expense_id: int, db: AsyncSession = Depends(get_db)):
 @router.put("/{expense_id}", response_model=ExpenseOut)
 async def update_expense(expense_id: int, body: ExpenseUpdate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Expense).options(selectinload(Expense.category)).where(Expense.id == expense_id)
+        select(Expense).options(selectinload(Expense.category)).where(
+            Expense.id == expense_id,
+            Expense.deleted_at.is_(None),
+        )
     )
     expense = result.scalar_one_or_none()
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
-    for field, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    for field, value in updates.items():
         setattr(expense, field, value)
+
+    # Recalculate base_amount if currency or amount changed
+    currency = updates.get("currency", expense.currency)
+    amount = updates.get("amount", expense.amount)
+    base_changed = "currency" in updates or "amount" in updates
+    if base_changed and "base_amount" not in updates:
+        if currency == "SGD":
+            expense.base_amount = amount
+        else:
+            rate_result = await db.execute(
+                select(ExchangeRate).where(ExchangeRate.target_currency == currency)
+            )
+            rate_obj = rate_result.scalar_one_or_none()
+            if rate_obj:
+                expense.base_amount = round(float(amount) * float(rate_obj.rate), 2)
+
     await db.commit()
     await db.refresh(expense)
     result = await db.execute(
@@ -134,5 +159,5 @@ async def delete_expense(
     if permanent:
         await db.delete(expense)
     else:
-        expense.deleted_at = datetime.now(expense.deleted_at.tzinfo) if expense.deleted_at else datetime.utcnow()
+        expense.deleted_at = datetime.now(tz=timezone.utc)
     await db.commit()

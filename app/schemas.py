@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Category ──────────────────────────────────────────────────────────────────
@@ -40,6 +40,13 @@ class ExpenseCreate(BaseModel):
     receipt_image_path: str | None = None
     source: str = Field(default="manual", pattern="^(manual|ocr)$")
 
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, v: str | None) -> str | None:
+        if v is not None and v not in VALID_PAYMENT_METHODS:
+            raise ValueError(f"payment_method must be one of {sorted(VALID_PAYMENT_METHODS)}")
+        return v
+
 
 class ExpenseUpdate(BaseModel):
     amount: Decimal | None = Field(default=None, gt=0, decimal_places=2)
@@ -52,6 +59,13 @@ class ExpenseUpdate(BaseModel):
     location: str | None = Field(default=None, max_length=255)
     tags: list[str] | None = None
     notes: str | None = None
+
+    @field_validator("payment_method")
+    @classmethod
+    def validate_payment_method(cls, v: str | None) -> str | None:
+        if v is not None and v not in VALID_PAYMENT_METHODS:
+            raise ValueError(f"payment_method must be one of {sorted(VALID_PAYMENT_METHODS)}")
+        return v
 
 
 class ExpenseOut(BaseModel):
