@@ -19,8 +19,16 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(api_key=settings.gemini_api_key)
 _MODEL = "gemini-2.5-flash"
+_client: genai.Client | None = None
+
+
+def _get_client() -> genai.Client:
+    """Lazy-initialize the Gemini client to avoid crash on startup if unused."""
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=settings.gemini_api_key)
+    return _client
 
 # Categories sent to the model so it picks from the predefined list.
 _CATEGORIES = [
@@ -50,18 +58,25 @@ Example output:
 """
 
 
-def _resize_if_needed(image_bytes: bytes, max_bytes: int = 4 * 1024 * 1024) -> bytes:
-    """Reduce image to under max_bytes by halving dimensions iteratively."""
+def _resize_if_needed(image_bytes: bytes, max_bytes: int = 4 * 1024 * 1024) -> tuple[bytes, str]:
+    """Reduce image to under max_bytes by halving dimensions iteratively.
+    Returns (resized_bytes, original_mime_type).
+    """
+    mime = _detect_mime(image_bytes)
     if len(image_bytes) <= max_bytes:
-        return image_bytes
+        return image_bytes, mime
     img = Image.open(BytesIO(image_bytes))
+    fmt = "JPEG" if mime == "image/jpeg" else "PNG"
     while len(image_bytes) > max_bytes:
         w, h = img.size
         img = img.resize((w // 2, h // 2), Image.LANCZOS)
         buf = BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+        if fmt == "PNG":
+            img.save(buf, format="PNG", optimize=True)
+        else:
+            img.save(buf, format="JPEG", quality=85)
         image_bytes = buf.getvalue()
-    return image_bytes
+    return image_bytes, mime
 
 
 def _detect_mime(image_bytes: bytes) -> str:
@@ -83,16 +98,16 @@ async def parse_receipt(image_bytes: bytes) -> dict:
     Returns a dict with keys: date, amount, currency, vendor, category, raw_text.
     Any field may be None if not found. Retries once on rate limit (429).
     """
-    image_bytes = _resize_if_needed(image_bytes)
-    mime_type = _detect_mime(image_bytes)
+    image_bytes, mime_type = _resize_if_needed(image_bytes)
 
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
     async def _call() -> str:
         loop = asyncio.get_event_loop()
+        client = _get_client()
         response = await loop.run_in_executor(
             None,
-            lambda: _client.models.generate_content(
+            lambda: client.models.generate_content(
                 model=_MODEL,
                 contents=[_SYSTEM_PROMPT, image_part],
             ),
