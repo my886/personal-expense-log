@@ -97,6 +97,8 @@ class OcrResult(BaseModel):
     date: dt.date | None = None
     amount: Decimal | None = None
     currency: str = "SGD"
+    currency_confirmed: bool = False    # True only if the receipt itself shows the currency
+    currency_note: str | None = None    # evidence used, or why the currency was assumed
     vendor: str | None = None
     category_id: int | None = None
     category_name: str | None = None

@@ -1,14 +1,15 @@
 import os
 import uuid
+from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.models import Category
+from app.models import Category, Expense
 from app.schemas import OcrResult
 from app.services.vision import parse_receipt
 
@@ -17,6 +18,34 @@ router = APIRouter(prefix="/expenses", tags=["ocr"])
 _ALLOWED_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 _MAX_SIZE = 20 * 1024 * 1024  # 20 MB
 _MAX_BATCH = 10  # Gemini free tier is 15 RPM; keep one request well under that
+_DEFAULT_CURRENCY = "SGD"   # user lives in Singapore
+_TRIP_WINDOW_DAYS = 3       # recent foreign-currency expenses within this window suggest a trip
+_TRIP_MIN_EXPENSES = 2
+
+
+async def _resolve_currency(parsed: dict, db: AsyncSession) -> tuple[str, bool, str]:
+    """Return (currency, confirmed, note). Trust the model only when it cites evidence on the
+    receipt; otherwise infer from recent expenses (on a trip?) and fall back to SGD."""
+    if parsed.get("currency") and parsed.get("currency_evidence"):
+        return parsed["currency"], True, parsed["currency_evidence"]
+
+    around = parsed.get("date") or date.today()
+    trip = (
+        await db.execute(
+            select(Expense.currency, func.count())
+            .where(
+                Expense.currency != _DEFAULT_CURRENCY,
+                Expense.deleted_at.is_(None),
+                Expense.date.between(around - timedelta(days=_TRIP_WINDOW_DAYS), around + timedelta(days=_TRIP_WINDOW_DAYS)),
+            )
+            .group_by(Expense.currency)
+            .order_by(func.count().desc())
+            .limit(1)
+        )
+    ).first()
+    if trip and trip[1] >= _TRIP_MIN_EXPENSES:
+        return trip[0], False, f"no currency on receipt; {trip[1]} {trip[0]} expenses within {_TRIP_WINDOW_DAYS} days suggest a trip"
+    return _DEFAULT_CURRENCY, False, "no currency on receipt; assumed SGD"
 
 
 async def _ocr_one(file: UploadFile, db: AsyncSession) -> OcrResult:
@@ -56,11 +85,15 @@ async def _ocr_one(file: UploadFile, db: AsyncSession) -> OcrResult:
                     category_id = cat.id
                     category_name = "Others"
 
+        currency, currency_confirmed, currency_note = await _resolve_currency(parsed, db)
+
         return OcrResult(
             filename=file.filename,
             date=parsed["date"],
             amount=parsed["amount"],
-            currency=parsed["currency"],
+            currency=currency,
+            currency_confirmed=currency_confirmed,
+            currency_note=currency_note,
             vendor=parsed["vendor"],
             category_id=category_id,
             category_name=category_name,

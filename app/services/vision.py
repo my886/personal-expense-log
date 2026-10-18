@@ -48,13 +48,20 @@ Return ONLY a JSON object — no markdown, no explanation.
 Fields:
 - date: ISO 8601 date string (YYYY-MM-DD), or null if not found
 - amount: total amount as a number (e.g. 45.50), or null if not found
-- currency: ISO 4217 currency code (e.g. MYR, USD, SGD), default to MYR if unclear
+- currency: ISO 4217 currency code (e.g. SGD, MYR, USD) — ONLY if the receipt shows evidence, otherwise null.
+  A bare "$" alone is NOT evidence. Evidence includes:
+    explicit symbol/code: "S$", "SGD", "RM", "MYR", "US$", "USD"
+    tax line: "GST Reg No" / 9% GST -> SGD; "SST" / SST No. -> MYR
+    company suffix: "Pte Ltd" -> SGD; "Sdn Bhd" / "Bhd" -> MYR
+    address/phone: "Singapore", 6-digit postcode, +65 -> SGD; Malaysian state/city, 5-digit postcode, +60 -> MYR
+    payment: PayNow, NETS -> SGD; DuitNow, Touch 'n Go, MyKasih -> MYR
+- currency_evidence: the clue(s) you used for currency (e.g. "Sdn Bhd + SST 6%"), or null if none
 - vendor: the business or store name, or null if not found
 - category: best matching category from this list: {_CATEGORIES}
 - raw_text: all text found on the receipt, as a single string
 
 Example output:
-{{"date": "2026-04-11", "amount": 45.50, "currency": "MYR", "vendor": "McDonald's", "category": "Food", "raw_text": "McDonald's\\nDate: 11/04/2026\\nTotal: RM 45.50"}}
+{{"date": "2026-04-11", "amount": 45.50, "currency": "MYR", "currency_evidence": "RM symbol", "vendor": "McDonald's", "category": "Food", "raw_text": "McDonald's\\nDate: 11/04/2026\\nTotal: RM 45.50"}}
 """
 
 
@@ -95,8 +102,8 @@ async def parse_receipt(image_bytes: bytes) -> dict:
     """
     Send receipt image to Gemini Vision and return parsed fields.
 
-    Returns a dict with keys: date, amount, currency, vendor, category, raw_text.
-    Any field may be None if not found. Retries once on rate limit (429).
+    Returns a dict with keys: date, amount, currency, currency_evidence, vendor, category, raw_text.
+    Any field may be None if not found; currency is None unless the receipt shows evidence for it. Retries once on rate limit (429).
     """
     image_bytes, mime_type = _resize_if_needed(image_bytes)
 
@@ -136,7 +143,8 @@ async def parse_receipt(image_bytes: bytes) -> dict:
         return {
             "date": None,
             "amount": None,
-            "currency": "MYR",
+            "currency": None,
+            "currency_evidence": None,
             "vendor": None,
             "category": None,
             "raw_text": text,
@@ -156,10 +164,15 @@ async def parse_receipt(image_bytes: bytes) -> dict:
         except InvalidOperation:
             pass
 
+    currency = str(data.get("currency") or "").strip().upper()
+    if not (len(currency) == 3 and currency.isalpha()):
+        currency = None
+
     return {
         "date": parsed_date,
         "amount": parsed_amount,
-        "currency": str(data.get("currency") or "MYR").upper()[:3],
+        "currency": currency,
+        "currency_evidence": data.get("currency_evidence") or None,
         "vendor": data.get("vendor"),
         "category": data.get("category"),
         "raw_text": data.get("raw_text"),
