@@ -54,3 +54,16 @@ Benchmarked on 23 real SG receipts (truth = logged expenses) + 10 synthetic CN/J
 | Linking | Auto-match on create (category + regex), explicit `recurring_id`, one live link per template/month (partial unique index) | Agent doesn't need to know template ids; duplicates surface as 409 |
 | Trigger | systemd user timer, idempotent endpoint | Matches how the API runs; `Persistent=true` catches up after downtime |
 | History | No back-filled fixed costs before Aug 2026 | Don't fabricate records; compare months on variable spend instead |
+
+### 2026-10-18 — Receipt categories and mixed-basket splits
+
+Added Groceries and Household; Shopping now means durables/clothing/gadgets/gifts (it had mixed bread, detergent and appliances).
+
+Item extraction tested before building: 24 real receipts × 2 runs — 48/50 reconciled to the total (2 misses = PayNow screenshot with no items). 5 synthetic SG receipts × 3 runs covering member discounts, multi-buy, a cross-category "any 3 for $20", per-kg, % off, points, vouchers, bag charge, rounding, 12 items — 15/15 per-category splits exact to the cent. Risk found: asked to make lines reconcile, the model invented a "voucher" line for a Shopee order whose $5 gap isn't on screen.
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Granularity | Split a receipt only when its items span categories (one expense per category); no item table | Most of the analytics benefit with no schema change; single-category receipts stay one entry |
+| Discount allocation | Item-level adjustments (`applies_to`) to their items' categories; whole-bill lines and unexplained difference prorated | Member/multi-buy deals belong to the item; vouchers/points are bill-wide |
+| Reconciliation | Model reports printed lines only; server computes `unexplained` = total − lines | Avoids invented lines; gap is surfaced, not hidden |
+| Multi-receipt images | One OCR result per receipt; payment slips merged into their receipt | Folded card slips were counted as separate receipts |

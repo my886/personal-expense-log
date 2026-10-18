@@ -26,14 +26,22 @@ _TIMEOUT = 60.0
 # Categories sent to the model so it picks from the predefined list.
 _CATEGORIES = [
     "Food",
+    "Groceries",
+    "Fruits",
+    "Household",
     "Transport",
     "Utilities",
     "Rent",
     "Healthcare",
     "Shopping",
     "Entertainment",
+    "Travel",
     "Others",
 ]
+
+_CATEGORY_GUIDE = """Food = ready-to-eat meals/drinks bought out; Groceries = food & drink to take home;
+  Fruits = fresh/frozen fruit; Household = toiletries, oral care, cleaning, laundry, tissue, wraps, pest control;
+  Healthcare = medicine, vitamins, supplements, clinic; Shopping = durables, clothing, shoes, gadgets, gifts"""
 
 _SYSTEM_PROMPT = f"""You are a receipt parser. The image may show one receipt or several separate receipts
 (e.g. two slips photographed side by side). Extract each receipt separately.
@@ -65,12 +73,23 @@ Fields per receipt:
   A postcode's digit count alone is NOT evidence (Singapore and China both use 6 digits).
 - currency_evidence: the clue(s) used for currency (e.g. "Sdn Bhd + SST 6%"), or null if none
 - vendor: the business or store name, or null if not found
-- category: best matching category from this list: {_CATEGORIES}
-
+- category: best matching category for the receipt as a whole, from this list: {_CATEGORIES}
+  {_CATEGORY_GUIDE}
+- items: every purchased product line, in printed order (empty list if none are shown, e.g. a payment screenshot):
+  {{"name": str, "qty": number, "amount": number, "category": one of the categories above}}
+  amount = the line's printed price before any separate discount line (e.g. "5 x 0.70  3.50" -> 3.50).
+- adjustments: every OTHER printed line that changes the amount paid, as signed numbers:
+  {{"description": str, "amount": number, "applies_to": [0-based indexes into items] or null}}
+  Negative: item discounts, member/promo discounts, multi-buy deals, points redeemed, vouchers.
+  Positive: bag charge, bottle deposit, service charge, delivery, GST only when added on top of prices. Either: rounding.
+  applies_to: the item(s) a discount belongs to — usually the item(s) printed directly above it; for a multi-buy
+  deal, all the items it covers; null for whole-bill lines (vouchers, points, rounding, bag charge, service charge).
+  EXCLUDE: subtotal, total, payment/tender, change, "GST included" lines, and "total savings" summaries.
+  Only report lines actually printed. Never invent a line to make the numbers add up.
 - raw_text: all text found on this receipt (not the other receipts), as a single string
 
 Example output:
-{{"receipts": [{{"date": "2026-04-11", "amount": 45.50, "currency": "MYR", "currency_evidence": "RM symbol", "vendor": "McDonald's", "category": "Food", "raw_text": "McDonald's\\nDate: 11/04/2026\\nTotal: RM 45.50"}}]}}
+{{"receipts": [{{"date": "2026-04-11", "amount": 45.50, "currency": "MYR", "currency_evidence": "RM symbol", "vendor": "McDonald's", "category": "Food", "items": [{{"name": "Big Mac Meal", "qty": 1, "amount": 45.50, "category": "Food"}}], "adjustments": [], "raw_text": "McDonald's\\nDate: 11/04/2026\\nTotal: RM 45.50"}}]}}
 """
 
 
@@ -133,6 +152,8 @@ def _parse_one(data: dict) -> dict:
         "currency_evidence": data.get("currency_evidence") or None,
         "vendor": data.get("vendor"),
         "category": data.get("category"),
+        "items": data.get("items") if isinstance(data.get("items"), list) else [],
+        "adjustments": data.get("adjustments") if isinstance(data.get("adjustments"), list) else [],
         "raw_text": data.get("raw_text"),
     }
 
@@ -141,7 +162,8 @@ async def parse_receipts(image_bytes: bytes) -> list[dict]:
     """
     Send an image to the vision model and return one dict per receipt shown in it.
 
-    Each dict has keys: date, amount, currency, currency_evidence, vendor, category, raw_text.
+    Each dict has keys: date, amount, currency, currency_evidence, vendor, category, items, adjustments, raw_text.
+    items / adjustments are the model's raw line lists (see app/services/split.py).
     Any field may be None if not found; currency is None unless the receipt shows evidence for it.
     Retries once on rate limit (429) or server error.
     """

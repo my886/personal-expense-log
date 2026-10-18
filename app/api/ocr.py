@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.models import Category, Expense
-from app.schemas import OcrResult
+from app.schemas import OcrResult, OcrSplit
+from app.services.split import split_receipt
 from app.services.vision import parse_receipts
 
 router = APIRouter(prefix="/expenses", tags=["ocr"])
@@ -48,22 +49,26 @@ async def _resolve_currency(parsed: dict, db: AsyncSession) -> tuple[str, bool, 
     return _DEFAULT_CURRENCY, False, "no currency on receipt; assumed SGD"
 
 
+async def _resolve_category(name: str | None, db: AsyncSession) -> tuple[int | None, str | None]:
+    """Category id/name for a model-picked name; unknown names fall back to "Others"."""
+    if not name:
+        return None, None
+    cat = await db.scalar(select(Category).where(Category.name == name))
+    if not cat:
+        cat = await db.scalar(select(Category).where(Category.name == "Others"))
+    return (cat.id, cat.name) if cat else (None, name)
+
+
 async def _to_result(parsed: dict, filename: str | None, image_path: str, index: int, count: int,
                      db: AsyncSession) -> OcrResult:
-    category_id = None
-    category_name = parsed.get("category")
-    if category_name:
-        cat = await db.scalar(select(Category).where(Category.name == category_name))
-        if cat:
-            category_id = cat.id
-        else:
-            # fallback to "Others"
-            cat = await db.scalar(select(Category).where(Category.name == "Others"))
-            if cat:
-                category_id = cat.id
-                category_name = "Others"
-
+    category_id, category_name = await _resolve_category(parsed.get("category"), db)
     currency, currency_confirmed, currency_note = await _resolve_currency(parsed, db)
+
+    raw_splits, unexplained = split_receipt(parsed["amount"], parsed.get("category"), parsed["items"], parsed["adjustments"])
+    splits = []
+    for s in raw_splits:
+        split_id, split_name = await _resolve_category(s["category"], db)
+        splits.append(OcrSplit(category_id=split_id, category_name=split_name, amount=s["amount"], items=s["items"]))
 
     return OcrResult(
         filename=filename,
@@ -79,6 +84,8 @@ async def _to_result(parsed: dict, filename: str | None, image_path: str, index:
         category_name=category_name,
         raw_text=parsed["raw_text"],
         receipt_image_path=image_path,
+        splits=splits,
+        unexplained=unexplained,
     )
 
 

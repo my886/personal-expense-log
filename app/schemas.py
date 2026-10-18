@@ -97,6 +97,13 @@ class ExpenseOut(BaseModel):
 
 # ── OCR result (not saved) ────────────────────────────────────────────────────
 
+class OcrSplit(BaseModel):
+    category_id: int | None = None
+    category_name: str | None = None
+    amount: Decimal | None = None
+    items: list[str] = []
+
+
 class OcrResult(BaseModel):
     filename: str | None = None
     receipt_index: int = 1              # position of this receipt within the image (1-based)
@@ -111,6 +118,9 @@ class OcrResult(BaseModel):
     category_name: str | None = None
     raw_text: str | None = None
     receipt_image_path: str | None = None
+    # one per category, summing to amount; >1 = mixed basket, log one expense per split
+    splits: list[OcrSplit] = []
+    unexplained: Decimal | None = None  # total minus printed lines (e.g. voucher not shown); prorated into splits
     error: str | None = None
 
 
