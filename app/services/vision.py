@@ -1,34 +1,27 @@
 """
-Receipt parsing via Gemini Vision API.
+Receipt parsing via a vision LLM on OpenRouter.
 
-Exposes a single `parse_receipt` function. To swap to a different vision LLM
-(GLM-4V, OpenAI GPT-4o, Claude), replace only this file.
+Exposes a single `parse_receipt` function. Models are tried in the order given by
+VISION_MODELS (OpenRouter falls back to the next on provider errors), so switching
+models is a config change. To leave OpenRouter, replace only this file.
 """
 import asyncio
+import base64
 import json
 import logging
 from io import BytesIO
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
-from google import genai
-from google.genai import types
+import httpx
 from PIL import Image
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "gemini-2.5-flash"
-_client: genai.Client | None = None
-
-
-def _get_client() -> genai.Client:
-    """Lazy-initialize the Gemini client to avoid crash on startup if unused."""
-    global _client
-    if _client is None:
-        _client = genai.Client(api_key=settings.gemini_api_key)
-    return _client
+_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+_TIMEOUT = 60.0
 
 # Categories sent to the model so it picks from the predefined list.
 _CATEGORIES = [
@@ -46,16 +39,27 @@ _SYSTEM_PROMPT = f"""You are a receipt parser. Extract the following fields from
 Return ONLY a JSON object — no markdown, no explanation.
 
 Fields:
-- date: ISO 8601 date string (YYYY-MM-DD), or null if not found
-- amount: total amount as a number (e.g. 45.50), or null if not found
-- currency: ISO 4217 currency code (e.g. SGD, MYR, USD) — ONLY if the receipt shows evidence, otherwise null.
-  A bare "$" alone is NOT evidence. Evidence includes:
-    explicit symbol/code: "S$", "SGD", "RM", "MYR", "US$", "USD"
-    tax line: "GST Reg No" / 9% GST -> SGD; "SST" / SST No. -> MYR
-    company suffix: "Pte Ltd" -> SGD; "Sdn Bhd" / "Bhd" -> MYR
-    address/phone: "Singapore", 6-digit postcode, +65 -> SGD; Malaysian state/city, 5-digit postcode, +60 -> MYR
-    payment: PayNow, NETS -> SGD; DuitNow, Touch 'n Go, MyKasih -> MYR
-- currency_evidence: the clue(s) you used for currency (e.g. "Sdn Bhd + SST 6%"), or null if none
+- date: ISO 8601 date string (YYYY-MM-DD) of the purchase/payment, or null if not shown.
+  Do not use other dates on the receipt (delivery, exam, expiry, travel dates). Mind the country's
+  date order: DD/MM/YYYY in SG/MY/VN/ID/EU, YYYY/MM/DD or YYYY年MM月DD日 in CN/JP.
+- amount: final total paid, as a plain JSON number in the currency's main unit, or null if not found.
+  Normalise number formats — thousands separators vary:
+    "150.000 ₫" or "150,000đ" -> 150000;  "Rp 25.500" -> 25500;  "¥1,280" -> 1280;  "12,50 €" -> 12.50;  "1.234,56 €" -> 1234.56
+  JPY, VND and IDR have no cents: their amounts are whole numbers.
+- currency: ISO 4217 code — ONLY if the receipt shows evidence for it, otherwise null.
+  Enough on its own: an explicit code (SGD, MYR, CNY/RMB, JPY, EUR, VND, IDR, USD, THB, ...) or an
+  unambiguous symbol: S$ -> SGD, RM -> MYR, 元/人民币 -> CNY, 円 -> JPY, € -> EUR, ₫/đ -> VND, Rp -> IDR, US$ -> USD.
+  Ambiguous — need a country clue as well: "$" (SGD, USD, AUD, HKD, ...) and "¥"/"￥" (CNY or JPY).
+  Country clues:
+    Singapore -> SGD: "Singapore" in address, GST Reg No / 9% GST, Pte Ltd, +65, PayNow, NETS
+    Malaysia -> MYR: Sdn Bhd / Bhd, SST, Malaysian state or city, +60, DuitNow, Touch 'n Go, MyKasih
+    China -> CNY: simplified Chinese, 发票 / 增值税 / 合计 / 实收, +86, 支付宝 Alipay, 微信支付 WeChat Pay
+    Japan -> JPY: hiragana/katakana, 税込 / 消費税 / 合計 / 領収書, 〒 postcode, +81, PayPay, Suica
+    Vietnam -> VND: Vietnamese (Tổng cộng, Thành tiền, Hóa đơn), +84, MoMo, ZaloPay, VNPay
+    Indonesia -> IDR: Indonesian (Total Bayar, Kembalian, PPN, NPWP), "Jl." street, +62, QRIS, GoPay, OVO, DANA
+    Eurozone -> EUR: MwSt/USt, TVA, IVA, BTW, ALV tax lines; EU country addresses
+  A postcode's digit count alone is NOT evidence (Singapore and China both use 6 digits).
+- currency_evidence: the clue(s) used for currency (e.g. "Sdn Bhd + SST 6%"), or null if none
 - vendor: the business or store name, or null if not found
 - category: best matching category from this list: {_CATEGORIES}
 - raw_text: all text found on the receipt, as a single string
@@ -100,37 +104,45 @@ def _detect_mime(image_bytes: bytes) -> str:
 
 async def parse_receipt(image_bytes: bytes) -> dict:
     """
-    Send receipt image to Gemini Vision and return parsed fields.
+    Send receipt image to the vision model and return parsed fields.
 
     Returns a dict with keys: date, amount, currency, currency_evidence, vendor, category, raw_text.
-    Any field may be None if not found; currency is None unless the receipt shows evidence for it. Retries once on rate limit (429).
+    Any field may be None if not found; currency is None unless the receipt shows evidence for it.
+    Retries once on rate limit (429) or server error.
     """
     image_bytes, mime_type = _resize_if_needed(image_bytes)
-
-    image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+    image_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
+    body = {
+        "models": settings.vision_model_list,
+        "temperature": 0,
+        "max_tokens": 4000,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": _SYSTEM_PROMPT},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]}],
+    }
 
     async def _call() -> str:
-        loop = asyncio.get_event_loop()
-        client = _get_client()
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model=_MODEL,
-                contents=[_SYSTEM_PROMPT, image_part],
-            ),
-        )
-        return response.text
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                _API_URL,
+                json=body,
+                headers={"Authorization": f"Bearer {settings.openrouter_api_key}", "X-Title": "expense-log"},
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("Receipt parsed by %s", data.get("model"))
+        return data["choices"][0]["message"]["content"]
 
     try:
         text = await _call()
-    except Exception as e:
-        error_str = str(e)
-        if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():
-            logger.warning("Gemini rate limit hit, retrying in 5s")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429 or e.response.status_code >= 500:
+            logger.warning("Vision API %s, retrying in 5s", e.response.status_code)
             await asyncio.sleep(5)
             text = await _call()
         else:
-            logger.error("Gemini API error: %s", e)
+            logger.error("Vision API error: %s %s", e.response.status_code, e.response.text[:200])
             raise
 
     # strip accidental markdown fences
@@ -139,7 +151,7 @@ async def parse_receipt(image_bytes: bytes) -> dict:
     try:
         data = json.loads(clean)
     except json.JSONDecodeError:
-        logger.warning("Gemini returned non-JSON: %s", text[:200])
+        logger.warning("Vision model returned non-JSON: %s", text[:200])
         return {
             "date": None,
             "amount": None,

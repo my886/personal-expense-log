@@ -160,7 +160,7 @@ class PurgeResult(BaseModel):
 class ExchangeRateSet(BaseModel):
     """Set or update an exchange rate. rate = how many SGD per 1 unit of target currency."""
     target_currency: str = Field(..., min_length=3, max_length=3)
-    rate: Decimal = Field(..., gt=0, decimal_places=6)
+    rate: Decimal = Field(..., gt=0, decimal_places=10)
     rate_date: dt.date | None = None  # defaults to today
 
 

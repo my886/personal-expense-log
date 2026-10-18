@@ -2,7 +2,11 @@
 Exchange rates to SGD (base currency).
 
 Rates are looked up by expense date: cached row in exchange_rates -> Frankfurter
-(ECB reference rates, free, no key) -> nearest cached rate as a last resort.
+(ECB reference rates, free, no key) -> fawazahmed0 currency-api (market rates, covers
+currencies the ECB doesn't, e.g. VND) -> nearest cached rate as a last resort.
+
+Both sources are queried as SGD -> X and inverted: the X -> SGD direction is rounded to
+5 decimal places, which leaves only 2 significant figures for IDR/VND.
 """
 import logging
 from datetime import date
@@ -18,28 +22,64 @@ from app.models import ExchangeRate
 logger = logging.getLogger(__name__)
 
 BASE_CURRENCY = "SGD"
-_API_URL = "https://api.frankfurter.dev/v1/{date}"
+_FRANKFURTER_URL = "https://api.frankfurter.dev/v1/{date}"
+_MARKET_URLS = (  # same data, two mirrors
+    "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{date}/v1/currencies/sgd.json",
+    "https://{date}.currency-api.pages.dev/v1/currencies/sgd.json",
+)
 _TIMEOUT = 5.0
+_RATE_PLACES = Decimal("0.0000000001")
 
 
-async def _fetch_rate(currency: str, on_date: date) -> tuple[Decimal, date] | None:
-    """Fetch 1 currency = X SGD for on_date. ECB has no weekend/holiday rates, so the
-    API returns the previous business day's rate along with that day's date."""
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.get(
-                _API_URL.format(date=on_date.isoformat()),
-                params={"base": currency, "symbols": BASE_CURRENCY},
-            )
-        if resp.status_code == 404:
-            logger.warning("FX: no rate for %s on %s (unsupported currency?)", currency, on_date)
-            return None
-        resp.raise_for_status()
-        data = resp.json()
-        return Decimal(str(data["rates"][BASE_CURRENCY])), date.fromisoformat(data["date"])
-    except Exception as e:
-        logger.warning("FX: fetch failed for %s on %s: %s", currency, on_date, e)
+def _invert(sgd_to_x) -> Decimal:
+    return (Decimal(1) / Decimal(str(sgd_to_x))).quantize(_RATE_PLACES, rounding=ROUND_HALF_UP)
+
+
+async def _fetch_ecb(client: httpx.AsyncClient, currency: str, on_date: date) -> tuple[Decimal, date] | None:
+    """ECB has no weekend/holiday rates: the API returns the previous business day's
+    rate along with that day's date. 404 = currency not covered by the ECB."""
+    resp = await client.get(
+        _FRANKFURTER_URL.format(date=on_date.isoformat()),
+        params={"base": BASE_CURRENCY, "symbols": currency},
+    )
+    if resp.status_code == 404:
         return None
+    resp.raise_for_status()
+    data = resp.json()
+    if currency not in data.get("rates", {}):
+        return None
+    return _invert(data["rates"][currency]), date.fromisoformat(data["date"])
+
+
+async def _fetch_market(client: httpx.AsyncClient, currency: str, on_date: date) -> tuple[Decimal, date] | None:
+    for url in _MARKET_URLS:
+        try:
+            resp = await client.get(url.format(date=on_date.isoformat()))
+            if resp.status_code == 404:
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            value = data[BASE_CURRENCY.lower()].get(currency.lower())
+            return (_invert(value), date.fromisoformat(data["date"])) if value else None
+        except Exception as e:
+            logger.warning("FX: market source %s failed: %s", url.split("/")[2], e)
+    return None
+
+
+async def _fetch_rate(currency: str, on_date: date) -> tuple[Decimal, date, str] | None:
+    """Fetch 1 currency = X SGD for on_date as (rate, published_date, source)."""
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        try:
+            ecb = await _fetch_ecb(client, currency, on_date)
+            if ecb:
+                return *ecb, "ecb"
+        except Exception as e:
+            logger.warning("FX: ECB fetch failed for %s on %s: %s", currency, on_date, e)
+        market = await _fetch_market(client, currency, on_date)
+        if market:
+            return *market, "market"
+    logger.warning("FX: no rate for %s on %s from any source", currency, on_date)
+    return None
 
 
 async def get_rate(db: AsyncSession, currency: str, on_date: date) -> Decimal | None:
@@ -60,12 +100,12 @@ async def get_rate(db: AsyncSession, currency: str, on_date: date) -> Decimal | 
 
     fetched = await _fetch_rate(currency, on_date)
     if fetched:
-        rate, published = fetched
+        rate, published, source = fetched
         # Today's rate may not be published yet — don't pin yesterday's rate to today.
         if on_date < date.today() or published == on_date:
             await db.execute(
                 insert(ExchangeRate)
-                .values(target_currency=currency, rate_date=on_date, rate=rate, source="ecb")
+                .values(target_currency=currency, rate_date=on_date, rate=rate, source=source)
                 .on_conflict_do_nothing(constraint="uq_exchange_rate_currency_date")
             )
         return rate
@@ -87,7 +127,7 @@ def to_base(amount: Decimal, rate: Decimal) -> Decimal:
 
 def implied_rate(amount: Decimal, base_amount: Decimal) -> Decimal:
     """Rate implied by a user-supplied SGD amount (e.g. the actual card/bank debit)."""
-    return (Decimal(base_amount) / Decimal(amount)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    return (Decimal(base_amount) / Decimal(amount)).quantize(_RATE_PLACES, rounding=ROUND_HALF_UP)
 
 
 async def apply_fx(db: AsyncSession, expense) -> None:

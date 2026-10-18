@@ -22,10 +22,10 @@ class Expense(Base):
     __tablename__ = "expenses"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), default="SGD", nullable=False)
     base_amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
-    fx_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)  # 1 currency = X SGD, rate used for base_amount
+    fx_rate: Mapped[Decimal | None] = mapped_column(Numeric(18, 10), nullable=True)  # 1 currency = X SGD, rate used for base_amount
     date: Mapped[date] = mapped_column(Date, nullable=False)
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     vendor: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -67,6 +67,6 @@ class ExchangeRate(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     target_currency: Mapped[str] = mapped_column(String(3), nullable=False)
     rate_date: Mapped[date] = mapped_column(Date, nullable=False)
-    rate: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)  # 1 target_currency = X SGD
-    source: Mapped[str] = mapped_column(String(10), default="manual", server_default="manual", nullable=False)  # 'ecb' | 'manual'
+    rate: Mapped[Decimal] = mapped_column(Numeric(18, 10), nullable=False)  # 1 target_currency = X SGD
+    source: Mapped[str] = mapped_column(String(10), default="manual", server_default="manual", nullable=False)  # 'ecb' | 'market' | 'manual'
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
