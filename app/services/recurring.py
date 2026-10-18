@@ -36,14 +36,11 @@ def _in_effect(template: RecurringExpense, month: date) -> bool:
     )
 
 
-async def _linked_expense(db: AsyncSession, template_id: int, month: date) -> Expense | None:
-    return await db.scalar(
-        select(Expense).where(
-            Expense.recurring_id == template_id,
-            Expense.recurring_month == month,
-            Expense.deleted_at.is_(None),
-        )
-    )
+async def _linked_expense(db: AsyncSession, template_id: int, month: date, include_deleted: bool = False) -> Expense | None:
+    stmt = select(Expense).where(Expense.recurring_id == template_id, Expense.recurring_month == month)
+    if not include_deleted:
+        stmt = stmt.where(Expense.deleted_at.is_(None))
+    return await db.scalar(stmt.limit(1))
 
 
 async def find_match(db: AsyncSession, expense: Expense) -> RecurringExpense | None:
@@ -87,7 +84,8 @@ async def run_due(db: AsyncSession, today: date) -> list[Expense]:
     for t in templates:
         if not _in_effect(t, month) or due_date(t, month) > today:
             continue
-        if await _linked_expense(db, t.id, month):
+        # a deleted linked expense means the user dismissed this month — don't recreate it
+        if await _linked_expense(db, t.id, month, include_deleted=True):
             continue
         expense = Expense(
             amount=t.amount,
