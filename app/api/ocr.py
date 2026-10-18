@@ -11,7 +11,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import Category, Expense
 from app.schemas import OcrResult
-from app.services.vision import parse_receipt
+from app.services.vision import parse_receipts
 
 router = APIRouter(prefix="/expenses", tags=["ocr"])
 
@@ -48,16 +48,51 @@ async def _resolve_currency(parsed: dict, db: AsyncSession) -> tuple[str, bool, 
     return _DEFAULT_CURRENCY, False, "no currency on receipt; assumed SGD"
 
 
-async def _ocr_one(file: UploadFile, db: AsyncSession) -> OcrResult:
+async def _to_result(parsed: dict, filename: str | None, image_path: str, index: int, count: int,
+                     db: AsyncSession) -> OcrResult:
+    category_id = None
+    category_name = parsed.get("category")
+    if category_name:
+        cat = await db.scalar(select(Category).where(Category.name == category_name))
+        if cat:
+            category_id = cat.id
+        else:
+            # fallback to "Others"
+            cat = await db.scalar(select(Category).where(Category.name == "Others"))
+            if cat:
+                category_id = cat.id
+                category_name = "Others"
+
+    currency, currency_confirmed, currency_note = await _resolve_currency(parsed, db)
+
+    return OcrResult(
+        filename=filename,
+        receipt_index=index,
+        receipt_count=count,
+        date=parsed["date"],
+        amount=parsed["amount"],
+        currency=currency,
+        currency_confirmed=currency_confirmed,
+        currency_note=currency_note,
+        vendor=parsed["vendor"],
+        category_id=category_id,
+        category_name=category_name,
+        raw_text=parsed["raw_text"],
+        receipt_image_path=image_path,
+    )
+
+
+async def _ocr_one(file: UploadFile, db: AsyncSession) -> list[OcrResult]:
+    """One result per receipt found in the image; a single result with `error` if the file fails."""
     if file.content_type not in _ALLOWED_TYPES:
-        return OcrResult(
+        return [OcrResult(
             filename=file.filename,
             error=f"Unsupported file type: {file.content_type}. Use JPEG or PNG.",
-        )
+        )]
 
     image_bytes = await file.read()
     if len(image_bytes) > _MAX_SIZE:
-        return OcrResult(filename=file.filename, error="File too large (max 20 MB)")
+        return [OcrResult(filename=file.filename, error="File too large (max 20 MB)")]
 
     # save image to uploads dir
     upload_dir = Path(settings.upload_dir)
@@ -70,40 +105,15 @@ async def _ocr_one(file: UploadFile, db: AsyncSession) -> OcrResult:
     # everything past this point can fail independently per file (Gemini call,
     # DB lookup) — any failure here must not take down the rest of the batch
     try:
-        parsed = await parse_receipt(image_bytes)
-
-        category_id = None
-        category_name = parsed.get("category")
-        if category_name:
-            cat = await db.scalar(select(Category).where(Category.name == category_name))
-            if cat:
-                category_id = cat.id
-            else:
-                # fallback to "Others"
-                cat = await db.scalar(select(Category).where(Category.name == "Others"))
-                if cat:
-                    category_id = cat.id
-                    category_name = "Others"
-
-        currency, currency_confirmed, currency_note = await _resolve_currency(parsed, db)
-
-        return OcrResult(
-            filename=file.filename,
-            date=parsed["date"],
-            amount=parsed["amount"],
-            currency=currency,
-            currency_confirmed=currency_confirmed,
-            currency_note=currency_note,
-            vendor=parsed["vendor"],
-            category_id=category_id,
-            category_name=category_name,
-            raw_text=parsed["raw_text"],
-            receipt_image_path=str(image_path),
-        )
+        receipts = await parse_receipts(image_bytes)
+        return [
+            await _to_result(parsed, file.filename, str(image_path), i, len(receipts), db)
+            for i, parsed in enumerate(receipts, start=1)
+        ]
     except Exception as e:
         # clean up saved file on any failure past this point (vision call or DB lookup)
         image_path.unlink(missing_ok=True)
-        return OcrResult(filename=file.filename, error=f"OCR failed: {e}")
+        return [OcrResult(filename=file.filename, error=f"OCR failed: {e}")]
 
 
 @router.post("/ocr", response_model=list[OcrResult])
@@ -117,4 +127,5 @@ async def ocr_receipt(
             detail=f"Too many files: {len(files)} (max {_MAX_BATCH} per request)",
         )
     # sequential, not concurrent: Gemini free tier is 15 RPM
-    return [await _ocr_one(file, db) for file in files]
+    # flat list: an image with several receipts yields several results (same receipt_image_path)
+    return [result for file in files for result in await _ocr_one(file, db)]

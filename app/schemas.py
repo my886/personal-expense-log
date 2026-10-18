@@ -99,6 +99,8 @@ class ExpenseOut(BaseModel):
 
 class OcrResult(BaseModel):
     filename: str | None = None
+    receipt_index: int = 1              # position of this receipt within the image (1-based)
+    receipt_count: int = 1              # receipts found in the image; >1 = log one expense per result
     date: dt.date | None = None
     amount: Decimal | None = None
     currency: str = "SGD"

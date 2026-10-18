@@ -1,7 +1,7 @@
 """
 Receipt parsing via a vision LLM on OpenRouter.
 
-Exposes a single `parse_receipt` function. Models are tried in the order given by
+Exposes a single `parse_receipts` function. Models are tried in the order given by
 VISION_MODELS (OpenRouter falls back to the next on provider errors), so switching
 models is a config change. To leave OpenRouter, replace only this file.
 """
@@ -35,10 +35,14 @@ _CATEGORIES = [
     "Others",
 ]
 
-_SYSTEM_PROMPT = f"""You are a receipt parser. Extract the following fields from the receipt image.
-Return ONLY a JSON object — no markdown, no explanation.
+_SYSTEM_PROMPT = f"""You are a receipt parser. The image may show one receipt or several separate receipts
+(e.g. two slips photographed side by side). Extract each receipt separately.
+Return ONLY a JSON object {{"receipts": [...]}} with one object per receipt, top-to-bottom / left-to-right —
+no markdown, no explanation. A single receipt is a list of one. NOT separate receipts: line items of one receipt,
+a card/NETS/terminal payment slip printed with or next to the receipt (often below a fold, e.g. "MASTER ... APPROVED"),
+or a payment slip whose amount and time match a receipt in the image — merge those into that receipt.
 
-Fields:
+Fields per receipt:
 - date: ISO 8601 date string (YYYY-MM-DD) of the purchase/payment, or null if not shown.
   Do not use other dates on the receipt (delivery, exam, expiry, travel dates). Mind the country's
   date order: DD/MM/YYYY in SG/MY/VN/ID/EU, YYYY/MM/DD or YYYY年MM月DD日 in CN/JP.
@@ -62,10 +66,11 @@ Fields:
 - currency_evidence: the clue(s) used for currency (e.g. "Sdn Bhd + SST 6%"), or null if none
 - vendor: the business or store name, or null if not found
 - category: best matching category from this list: {_CATEGORIES}
-- raw_text: all text found on the receipt, as a single string
+
+- raw_text: all text found on this receipt (not the other receipts), as a single string
 
 Example output:
-{{"date": "2026-04-11", "amount": 45.50, "currency": "MYR", "currency_evidence": "RM symbol", "vendor": "McDonald's", "category": "Food", "raw_text": "McDonald's\\nDate: 11/04/2026\\nTotal: RM 45.50"}}
+{{"receipts": [{{"date": "2026-04-11", "amount": 45.50, "currency": "MYR", "currency_evidence": "RM symbol", "vendor": "McDonald's", "category": "Food", "raw_text": "McDonald's\\nDate: 11/04/2026\\nTotal: RM 45.50"}}]}}
 """
 
 
@@ -102,11 +107,41 @@ def _detect_mime(image_bytes: bytes) -> str:
     return "image/jpeg"  # fallback
 
 
-async def parse_receipt(image_bytes: bytes) -> dict:
-    """
-    Send receipt image to the vision model and return parsed fields.
+def _parse_one(data: dict) -> dict:
+    parsed_date = None
+    if data.get("date"):
+        try:
+            parsed_date = date.fromisoformat(str(data["date"]))
+        except ValueError:
+            pass
 
-    Returns a dict with keys: date, amount, currency, currency_evidence, vendor, category, raw_text.
+    parsed_amount = None
+    if data.get("amount") is not None:
+        try:
+            parsed_amount = Decimal(str(data["amount"]))
+        except InvalidOperation:
+            pass
+
+    currency = str(data.get("currency") or "").strip().upper()
+    if not (len(currency) == 3 and currency.isalpha()):
+        currency = None
+
+    return {
+        "date": parsed_date,
+        "amount": parsed_amount,
+        "currency": currency,
+        "currency_evidence": data.get("currency_evidence") or None,
+        "vendor": data.get("vendor"),
+        "category": data.get("category"),
+        "raw_text": data.get("raw_text"),
+    }
+
+
+async def parse_receipts(image_bytes: bytes) -> list[dict]:
+    """
+    Send an image to the vision model and return one dict per receipt shown in it.
+
+    Each dict has keys: date, amount, currency, currency_evidence, vendor, category, raw_text.
     Any field may be None if not found; currency is None unless the receipt shows evidence for it.
     Retries once on rate limit (429) or server error.
     """
@@ -115,7 +150,7 @@ async def parse_receipt(image_bytes: bytes) -> dict:
     body = {
         "models": settings.vision_model_list,
         "temperature": 0,
-        "max_tokens": 4000,
+        "max_tokens": 8000,  # raw_text for several receipts
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": _SYSTEM_PROMPT},
             {"type": "image_url", "image_url": {"url": image_url}},
@@ -152,40 +187,10 @@ async def parse_receipt(image_bytes: bytes) -> dict:
         data = json.loads(clean)
     except json.JSONDecodeError:
         logger.warning("Vision model returned non-JSON: %s", text[:200])
-        return {
-            "date": None,
-            "amount": None,
-            "currency": None,
-            "currency_evidence": None,
-            "vendor": None,
-            "category": None,
-            "raw_text": text,
-        }
+        return [_parse_one({"raw_text": text})]
 
-    parsed_date = None
-    if data.get("date"):
-        try:
-            parsed_date = date.fromisoformat(str(data["date"]))
-        except ValueError:
-            pass
-
-    parsed_amount = None
-    if data.get("amount") is not None:
-        try:
-            parsed_amount = Decimal(str(data["amount"]))
-        except InvalidOperation:
-            pass
-
-    currency = str(data.get("currency") or "").strip().upper()
-    if not (len(currency) == 3 and currency.isalpha()):
-        currency = None
-
-    return {
-        "date": parsed_date,
-        "amount": parsed_amount,
-        "currency": currency,
-        "currency_evidence": data.get("currency_evidence") or None,
-        "vendor": data.get("vendor"),
-        "category": data.get("category"),
-        "raw_text": data.get("raw_text"),
-    }
+    # tolerate a bare receipt object or a bare list instead of {"receipts": [...]}
+    if isinstance(data, dict):
+        data = data.get("receipts", [data])
+    receipts = [_parse_one(r) for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+    return receipts or [_parse_one({"raw_text": text})]
