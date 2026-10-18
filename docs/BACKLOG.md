@@ -8,6 +8,8 @@
 - [ ] Auth / single-user login (Phase 2, if exposed publicly)
 - [ ] PDF support (Phase 2, single-page only via pdf2image)
 - [ ] Tags on expenses (Phase 2)
+- [ ] Parent/child categories (Food > Hawker / Dining / Groceries; Others is still a catch-all for gifts, exam fees)
+- [ ] Month-end forecast: fixed (logged + expected from /recurring/status) + variable run-rate
 - [ ] Scheduled image purge job (Phase 3)
 
 ## Decisions Log
@@ -42,3 +44,13 @@ Benchmarked on 23 real SG receipts (truth = logged expenses) + 10 synthetic CN/J
 | Model | Haiku 5.5, Qwen 3.8 Flash fallback (`VISION_MODELS`) | No wrong dates (returns null instead of guessing), fastest, cheapest; Qwen accurate but slow |
 | Provider | OpenRouter (paid) | Gemini free tier was 5 RPM with 503s (5/8 calls failed in a test); paid traffic not used for training; model swap = config change |
 | Currency | Evidence-only, SGD/trip fallback | See INCIDENTS 2026-10-18; supports SGD/MYR/CNY/JPY/VND/IDR/EUR clues + any explicit ISO code |
+
+### 2026-10-18 — Recurring / fixed costs
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Fixed definition | Expense linked to a recurring template | Per-expense, so one-off Transport (bus rides) stays variable while the MRT monthly bill is fixed |
+| Auto-create | Only fixed-amount templates (rent, remittance) | User logs variable bills manually; auto-creating estimates would double-log |
+| Linking | Auto-match on create (category + regex), explicit `recurring_id`, one live link per template/month (partial unique index) | Agent doesn't need to know template ids; duplicates surface as 409 |
+| Trigger | systemd user timer, idempotent endpoint | Matches how the API runs; `Persistent=true` catches up after downtime |
+| History | No back-filled fixed costs before Aug 2026 | Don't fabricate records; compare months on variable spend instead |

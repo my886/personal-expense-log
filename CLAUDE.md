@@ -31,3 +31,5 @@ Copy `.env.example` to `.env` and fill in values.
 - Vision model is chosen by benchmark on real receipts (see BACKLOG decisions); retry once on 429/5xx
 - Categories: 8 seeded defaults (is_default=true); user-added have is_default=false
 - `currency` defaults to SGD; non-SGD expenses auto-convert at the ECB rate for the expense date (`app/services/fx.py`), rate stored in `fx_rate`. ECB rates (Frankfurter) first, fawazahmed0 market rates for others (e.g. VND)
+- Fixed vs variable: expenses linked to a `recurring_expenses` template (`recurring_id`) are fixed. `auto_create` templates are logged by `POST /recurring/run`, triggered daily 08:00 SGT by systemd user timer `expense-recurring.timer` (`~/.config/systemd/user/`); others are auto-linked on create by category + `match` regex
+- Fixed costs were only logged from Aug 2026 — compare months on `variable_total`, not `total`

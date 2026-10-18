@@ -6,9 +6,10 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Expense
+from app.models import Expense, RecurringExpense
 from app.schemas import ExpenseCreate, ExpenseOut, ExpenseUpdate
 from app.services.fx import apply_fx, implied_rate
+from app.services.recurring import link
 
 router = APIRouter(prefix="/expenses", tags=["expenses"])
 
@@ -31,8 +32,34 @@ def _to_out(expense: Expense) -> ExpenseOut:
         raw_text=expense.raw_text,
         receipt_image_path=expense.receipt_image_path,
         source=expense.source,
+        recurring_id=expense.recurring_id,
+        is_fixed=expense.is_fixed,
         created_at=expense.created_at,
     )
+
+
+async def _apply_recurring(db: AsyncSession, expense: Expense, auto_match: bool) -> None:
+    """Validate/auto-link the recurring template; one live linked expense per template per month."""
+    # no autoflush: flushing the pending link first would hit the FK / unique index as a 500
+    with db.no_autoflush:
+        if expense.recurring_id is not None and not await db.get(RecurringExpense, expense.recurring_id):
+            raise HTTPException(status_code=404, detail="Recurring expense not found")
+        await link(db, expense, auto_match)
+        if expense.recurring_id is None:
+            return
+        stmt = select(Expense.id).where(
+            Expense.recurring_id == expense.recurring_id,
+            Expense.recurring_month == expense.recurring_month,
+            Expense.deleted_at.is_(None),
+        )
+        if expense.id is not None:
+            stmt = stmt.where(Expense.id != expense.id)
+        clash = await db.scalar(stmt)
+    if clash:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Recurring expense already logged for {expense.recurring_month:%Y-%m} (expense #{clash})",
+        )
 
 
 @router.get("", response_model=list[ExpenseOut])
@@ -77,6 +104,7 @@ async def create_expense(body: ExpenseCreate, db: AsyncSession = Depends(get_db)
         expense.fx_rate = implied_rate(expense.amount, expense.base_amount)
     else:
         await apply_fx(db, expense)
+    await _apply_recurring(db, expense, auto_match=True)
 
     db.add(expense)
     await db.commit()
@@ -125,6 +153,8 @@ async def update_expense(expense_id: int, body: ExpenseUpdate, db: AsyncSession 
         expense.fx_rate = implied_rate(expense.amount, expense.base_amount)
     elif updates.keys() & {"currency", "amount", "date", "base_amount"}:
         await apply_fx(db, expense)
+    if updates.keys() & {"recurring_id", "date"}:
+        await _apply_recurring(db, expense, auto_match=False)
 
     await db.commit()
     await db.refresh(expense)

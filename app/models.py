@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import ARRAY, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,6 +20,10 @@ class Category(Base):
 
 class Expense(Base):
     __tablename__ = "expenses"
+    __table_args__ = (
+        Index("uq_expense_recurring_month", "recurring_id", "recurring_month",
+              unique=True, postgresql_where=text("deleted_at IS NULL")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
@@ -35,11 +39,18 @@ class Expense(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     receipt_image_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    source: Mapped[str] = mapped_column(String(10), nullable=False)  # 'manual' | 'ocr'
+    source: Mapped[str] = mapped_column(String(10), nullable=False)  # 'manual' | 'ocr' | 'recurring'
+    # Linked to a recurring template = fixed cost; one live linked expense per template per month
+    recurring_id: Mapped[int | None] = mapped_column(ForeignKey("recurring_expenses.id"), nullable=True)
+    recurring_month: Mapped[date | None] = mapped_column(Date, nullable=True)  # first day of month
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     category: Mapped[Category | None] = relationship("Category", back_populates="expenses")
+
+    @property
+    def is_fixed(self) -> bool:
+        return self.recurring_id is not None
 
 
 class Budget(Base):
@@ -70,3 +81,27 @@ class ExchangeRate(Base):
     rate: Mapped[Decimal] = mapped_column(Numeric(18, 10), nullable=False)  # 1 target_currency = X SGD
     source: Mapped[str] = mapped_column(String(10), default="manual", server_default="manual", nullable=False)  # 'ecb' | 'market' | 'manual'
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class RecurringExpense(Base):
+    """A fixed monthly cost. auto_create=True logs it on its due day (fixed amounts, e.g. rent);
+    auto_create=False only tracks it as expected (variable bills the user logs themselves)."""
+    __tablename__ = "recurring_expenses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)  # exact if auto_create, else estimate
+    currency: Mapped[str] = mapped_column(String(3), default="SGD", nullable=False)
+    category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"), nullable=False)
+    vendor: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payment_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    match: Mapped[str | None] = mapped_column(String(255), nullable=True)  # regex on vendor/notes to auto-link logged expenses
+    day_of_month: Mapped[int] = mapped_column(Integer, nullable=False)  # clamped to month length
+    auto_create: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    start_month: Mapped[date] = mapped_column(Date, nullable=False)
+    end_month: Mapped[date | None] = mapped_column(Date, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    category: Mapped[Category] = relationship("Category")

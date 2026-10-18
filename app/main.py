@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import budgets, categories, expenses, exchange_rates, ocr, analytics, storage
+from app.api import budgets, categories, expenses, exchange_rates, ocr, analytics, recurring, storage
 
 
 @asynccontextmanager
@@ -23,6 +23,7 @@ app.include_router(categories.router)  # /categories
 app.include_router(budgets.router)     # /budgets
 app.include_router(exchange_rates.router)  # /exchange-rates
 app.include_router(analytics.router)   # /analytics/summary
+app.include_router(recurring.router)   # /recurring templates, status, run
 app.include_router(storage.router)     # DELETE /storage/images
 
 

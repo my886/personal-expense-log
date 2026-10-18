@@ -28,18 +28,20 @@ async def monthly_summary(
     # Use base_amount (SGD equivalent), fall back to amount for SGD entries
     amount_expr = func.coalesce(Expense.base_amount, Expense.amount)
 
-    # Total in SGD
+    # Total in SGD, split into fixed (linked to a recurring template) and variable
     total_result = await db.execute(
         select(
             func.coalesce(func.sum(amount_expr), 0),
             func.count(Expense.id),
+            func.coalesce(func.sum(amount_expr).filter(Expense.recurring_id.is_not(None)), 0),
         ).where(
             Expense.date >= start,
             Expense.date < end,
             Expense.deleted_at.is_(None),
         )
     )
-    total_amount, total_count = total_result.one()
+    total_amount, total_count, fixed_amount = total_result.one()
+    variable_amount = Decimal(str(total_amount)) - Decimal(str(fixed_amount))
 
     # By category in SGD
     breakdown_result = await db.execute(
@@ -74,10 +76,11 @@ async def monthly_summary(
     today = date.today()
     if today.year == year and today.month == mo:
         # Partial month — average over days elapsed so far
-        days_elapsed = max((today - start).days, 1)
-        daily_avg = Decimal(str(total_amount)) / days_elapsed
+        days = max((today - start).days, 1)
     else:
-        daily_avg = Decimal(str(total_amount)) / days_in_month
+        days = days_in_month
+    daily_avg = Decimal(str(total_amount)) / days
+    variable_daily_avg = variable_amount / days
 
     return MonthlySummary(
         month=month,
@@ -86,5 +89,8 @@ async def monthly_summary(
         currency="SGD",
         count=total_count,
         daily_avg=round(daily_avg, 2),
+        fixed_total=Decimal(str(fixed_amount)),
+        variable_total=variable_amount,
+        variable_daily_avg=round(variable_daily_avg, 2),
         by_category=by_category,
     )
