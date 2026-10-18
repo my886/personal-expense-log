@@ -30,4 +30,4 @@ Copy `.env.example` to `.env` and fill in values.
 - `receipt_image_path` is nullable — purging images sets it to NULL but expense records survive
 - Gemini free tier: 15 RPM / 1500 RPD — fine for personal use; retry once on 429
 - Categories: 8 seeded defaults (is_default=true); user-added have is_default=false
-- `currency` defaults to MYR; override per-expense for foreign receipts
+- `currency` defaults to SGD; non-SGD expenses auto-convert at the ECB rate for the expense date (`app/services/fx.py`), rate stored in `fx_rate`

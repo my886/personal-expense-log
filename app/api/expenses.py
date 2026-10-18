@@ -6,8 +6,9 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Expense, ExchangeRate
+from app.models import Expense
 from app.schemas import ExpenseCreate, ExpenseOut, ExpenseUpdate
+from app.services.fx import apply_fx, implied_rate
 
 router = APIRouter(prefix="/expenses", tags=["expenses"])
 
@@ -18,6 +19,7 @@ def _to_out(expense: Expense) -> ExpenseOut:
         amount=expense.amount,
         currency=expense.currency,
         base_amount=expense.base_amount,
+        fx_rate=expense.fx_rate,
         date=expense.date,
         category_id=expense.category_id,
         category_name=expense.category.name if expense.category else None,
@@ -66,21 +68,16 @@ async def list_expenses(
 @router.post("", response_model=ExpenseOut, status_code=201)
 async def create_expense(body: ExpenseCreate, db: AsyncSession = Depends(get_db)):
     data = body.model_dump()
-    currency = data.get("currency", "SGD")
-
-    # Auto-calculate base_amount if not provided and currency != SGD
-    if currency != "SGD" and data.get("base_amount") is None:
-        rate_result = await db.execute(
-            select(ExchangeRate).where(ExchangeRate.target_currency == currency)
-        )
-        rate_obj = rate_result.scalar_one_or_none()
-        if rate_obj:
-            base = float(data["amount"]) * float(rate_obj.rate)
-            data["base_amount"] = round(base, 2)
-    elif currency == "SGD" and data.get("base_amount") is None:
-        data["base_amount"] = data["amount"]
-
+    data["currency"] = data["currency"].upper()
     expense = Expense(**data)
+
+    # A supplied base_amount is the actual SGD debit — keep it and record the implied rate.
+    # Otherwise convert at the rate for the expense date.
+    if expense.base_amount is not None:
+        expense.fx_rate = implied_rate(expense.amount, expense.base_amount)
+    else:
+        await apply_fx(db, expense)
+
     db.add(expense)
     await db.commit()
     await db.refresh(expense)
@@ -118,23 +115,16 @@ async def update_expense(expense_id: int, body: ExpenseUpdate, db: AsyncSession 
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
     updates = body.model_dump(exclude_unset=True)
+    if updates.get("currency"):
+        updates["currency"] = updates["currency"].upper()
     for field, value in updates.items():
         setattr(expense, field, value)
 
-    # Recalculate base_amount if currency or amount changed
-    currency = updates.get("currency", expense.currency)
-    amount = updates.get("amount", expense.amount)
-    base_changed = "currency" in updates or "amount" in updates
-    if base_changed and "base_amount" not in updates:
-        if currency == "SGD":
-            expense.base_amount = amount
-        else:
-            rate_result = await db.execute(
-                select(ExchangeRate).where(ExchangeRate.target_currency == currency)
-            )
-            rate_obj = rate_result.scalar_one_or_none()
-            if rate_obj:
-                expense.base_amount = round(float(amount) * float(rate_obj.rate), 2)
+    # Recalculate base_amount if currency, amount or date changed (rate depends on date)
+    if updates.get("base_amount") is not None:
+        expense.fx_rate = implied_rate(expense.amount, expense.base_amount)
+    elif updates.keys() & {"currency", "amount", "date", "base_amount"}:
+        await apply_fx(db, expense)
 
     await db.commit()
     await db.refresh(expense)

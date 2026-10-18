@@ -73,6 +73,7 @@ class ExpenseOut(BaseModel):
     amount: Decimal
     currency: str
     base_amount: Decimal | None = None
+    fx_rate: Decimal | None = None
     date: dt.date
     category_id: int | None
     category_name: str | None
@@ -158,12 +159,23 @@ class ExchangeRateSet(BaseModel):
     """Set or update an exchange rate. rate = how many SGD per 1 unit of target currency."""
     target_currency: str = Field(..., min_length=3, max_length=3)
     rate: Decimal = Field(..., gt=0, decimal_places=6)
+    rate_date: dt.date | None = None  # defaults to today
 
 
 class ExchangeRateOut(BaseModel):
     id: int
     target_currency: str
+    rate_date: dt.date
     rate: Decimal
+    source: str
     updated_at: dt.datetime
 
     model_config = {"from_attributes": True}
+
+
+class FxQuote(BaseModel):
+    currency: str
+    date: dt.date
+    rate: Decimal | None    # 1 currency = X SGD; None if unavailable
+    amount: Decimal | None = None
+    base_amount: Decimal | None = None
